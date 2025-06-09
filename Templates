@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Processing Service</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="file"] { width: 100%; padding: 8px; }
+        button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        .result { margin-top: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 4px; }
+        .success { border-left: 4px solid #28a745; }
+        .error { border-left: 4px solid #dc3545; }
+    </style>
+</head>
+<body>
+    <h1>Video Processing Service</h1>
+    <p>This service can create story videos by combining audio, background video, and subtitles.</p>
+    
+    <h2>Create Story Video</h2>
+    <form id="storyVideoForm" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="audio">Audio File (MP3):</label>
+            <input type="file" id="audio" name="audio" accept=".mp3,.wav,.m4a" required>
+        </div>
+        
+        <div class="form-group">
+            <label for="background_video">Background Video:</label>
+            <input type="file" id="background_video" name="background_video" accept=".mp4,.avi,.mov,.webm" required>
+        </div>
+        
+        <div class="form-group">
+            <label for="subtitles">Subtitles (Optional):</label>
+            <input type="file" id="subtitles" name="subtitles" accept=".srt">
+        </div>
+        
+        <button type="submit">Create Story Video</button>
+    </form>
+    
+    <div id="result"></div>
+
+    <script>
+        document.getElementById('storyVideoForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData();
+            formData.append('audio', document.getElementById('audio').files[0]);
+            formData.append('background_video', document.getElementById('background_video').files[0]);
+            
+            const subtitles = document.getElementById('subtitles').files[0];
+            if (subtitles) {
+                formData.append('subtitles', subtitles);
+            }
+            
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>Processing video... This may take a few minutes.</p>';
+            
+            try {
+                const response = await fetch('/webhook/create-story-video', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    resultDiv.innerHTML = `
+                        <div class="result success">
+                            <h3>Success!</h3>
+                            <p><strong>Job ID:</strong> ${result.job_id}</p>
+                            <p><strong>Processing Time:</strong> ${result.processing_time} seconds</p>
+                            <p><strong>Download:</strong> <a href="${result.download_url}" target="_blank">Download Video</a></p>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="result error">
+                            <h3>Error</h3>
+                            <p>${result.error}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="result error">
+                        <h3>Error</h3>
+                        <p>Failed to process video: ${error.message}</p>
+                    </div>
+                `;
+            }
+        });
+    </script>
+</body>
+</html>
