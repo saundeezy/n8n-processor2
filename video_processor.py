@@ -53,8 +53,7 @@ class VideoProcessor:
                                             subtitle_path: Optional[str] = None, 
                                             output_filename: str = "final_video.mp4") -> Dict[str, Any]:
         """
-        Create a final video using FFmpeg directly (more reliable than MoviePy)
-        This is the main method your n8n workflow will use
+        Create a final video - try FFmpeg first, fallback to MoviePy
         """
         start_time = time.time()
         
@@ -74,18 +73,44 @@ class VideoProcessor:
             logger.info(f"Audio: {audio_path}")
             logger.info(f"Subtitles: {subtitle_path}")
             
-            # Get audio duration using MoviePy (temporary fallback)
+            # Get audio duration using MoviePy
             try:
-                from moviepy.editor import AudioFileClip
                 temp_audio = AudioFileClip(audio_path)
                 audio_duration = temp_audio.duration
                 temp_audio.close()
                 logger.info(f"Audio duration: {audio_duration} seconds")
             except Exception as e:
                 logger.error(f"Failed to get audio duration: {str(e)}")
-                # Fallback: assume 60 seconds if we can't get duration
                 audio_duration = 60.0
                 logger.warning(f"Using fallback duration of {audio_duration} seconds")
+            
+            # Try FFmpeg first
+            if self.check_ffmpeg_availability():
+                logger.info("FFmpeg available, using FFmpeg method")
+                return self._create_video_with_ffmpeg(background_video_path, audio_path, 
+                                                    subtitle_path, output_filename, 
+                                                    audio_duration, start_time)
+            else:
+                logger.info("FFmpeg not available, using MoviePy method")
+                return self._create_video_with_moviepy(background_video_path, audio_path, 
+                                                     subtitle_path, output_filename, 
+                                                     audio_duration, start_time)
+            
+        except Exception as e:
+            logger.error(f"Error creating video: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Video creation failed: {str(e)}'
+            }
+
+    def _create_video_with_ffmpeg(self, background_video_path: str, audio_path: str, 
+                                 subtitle_path: Optional[str], output_filename: str, 
+                                 audio_duration: float, start_time: float) -> Dict[str, Any]:
+        """
+        Create video using FFmpeg
+        """
+        try:
+            output_path = os.path.join(self.processed_folder, output_filename)
             
             # Build FFmpeg command
             ffmpeg_cmd = [
@@ -96,7 +121,7 @@ class VideoProcessor:
                 '-t', str(audio_duration),  # Duration = audio length
                 '-c:v', 'libx264',  # Video codec
                 '-c:a', 'aac',  # Audio codec
-                '-r', '24',  # Frame rate (fixes the video_fps issue)
+                '-r', '24',  # Frame rate
                 '-map', '0:v:0',  # Use video from first input
                 '-map', '1:a:0',  # Use audio from second input
                 '-shortest',  # Stop when shortest stream ends
@@ -107,8 +132,6 @@ class VideoProcessor:
             # Add subtitle support if subtitle file exists
             if subtitle_path and os.path.exists(subtitle_path):
                 logger.info(f"Adding subtitles from: {subtitle_path}")
-                # Add subtitle burning using FFmpeg - positioned for social media
-                # MarginV=150 moves subtitles up from bottom to avoid UI elements
                 ffmpeg_cmd.extend([
                     '-vf', f"subtitles='{subtitle_path}':force_style='FontSize=28,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=3,Bold=1,MarginV=150,Alignment=2'",
                 ])
@@ -118,41 +141,24 @@ class VideoProcessor:
             
             logger.info(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
             
-            # Run FFmpeg - first check if ffmpeg is available
-            try:
-                # Test if ffmpeg is available
-                subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                logger.error("FFmpeg not found, falling back to MoviePy approach")
-                return self._create_video_with_moviepy(background_video_path, audio_path, 
-                                                     subtitle_path, output_filename, audio_duration)
-            
             # Run FFmpeg
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
             
             if result.returncode != 0:
-                logger.error(f"FFmpeg error (return code {result.returncode}): {result.stderr}")
-                return {
-                    'success': False,
-                    'error': f'Video processing failed: {result.stderr}'
-                }
-            
-            logger.info("FFmpeg processing completed successfully")
+                logger.error(f"FFmpeg error: {result.stderr}")
+                raise Exception(f"FFmpeg failed: {result.stderr}")
             
             # Verify output file was created
             if not os.path.exists(output_path):
-                return {
-                    'success': False,
-                    'error': 'Output video file was not created'
-                }
+                raise Exception('Output video file was not created')
             
             # Calculate processing time
             processing_time = time.time() - start_time
             
-            # Get metadata of the final video
+            # Get metadata
             metadata = self.extract_metadata_from_path(output_path)
             
-            logger.info(f"Video creation completed: {output_filename} (took {processing_time:.2f}s)")
+            logger.info(f"FFmpeg video creation completed: {output_filename}")
             
             return {
                 'success': True,
@@ -162,31 +168,99 @@ class VideoProcessor:
                 'processing_time': round(processing_time, 2)
             }
             
-        except subprocess.TimeoutExpired:
-            logger.error("FFmpeg processing timed out")
-            return {
-                'success': False,
-                'error': 'Video processing timed out (>5 minutes)'
-            }
         except Exception as e:
-            logger.error(f"Error creating video: {str(e)}")
+            logger.error(f"FFmpeg method failed: {str(e)}")
+            # Fallback to MoviePy
+            logger.info("Falling back to MoviePy")
+            return self._create_video_with_moviepy(background_video_path, audio_path, 
+                                                 subtitle_path, output_filename, 
+                                                 audio_duration, start_time)
+
+    def _create_video_with_moviepy(self, background_video_path: str, audio_path: str, 
+                                  subtitle_path: Optional[str], output_filename: str, 
+                                  audio_duration: float, start_time: float) -> Dict[str, Any]:
+        """
+        Create video using MoviePy (fallback method)
+        """
+        try:
+            logger.info("Using MoviePy for video creation")
+            
+            output_path = os.path.join(self.processed_folder, output_filename)
+            
+            # Load video and audio
+            video_clip = VideoFileClip(background_video_path)
+            audio_clip = AudioFileClip(audio_path)
+            
+            # Set explicit FPS to avoid video_fps error
+            if video_clip.fps is None or video_clip.fps == 0:
+                video_clip.fps = 24
+                logger.info("Set video FPS to 24")
+            
+            # Loop the background video if it's shorter than the audio
+            if video_clip.duration < audio_duration:
+                loop_count = int(audio_duration / video_clip.duration) + 1
+                logger.info(f"Looping video {loop_count} times")
+                video_clip = video_clip.loop(n=loop_count)
+                video_clip.fps = 24
+            
+            # Cut the video to match audio duration
+            video_clip = video_clip.subclip(0, audio_duration)
+            video_clip.fps = 24
+            
+            # Replace the video's audio with our narration
+            final_video = video_clip.set_audio(audio_clip)
+            final_video.fps = 24
+            
+            # Write the final video with explicit parameters
+            logger.info("Writing video file...")
+            final_video.write_videofile(
+                output_path,
+                fps=24,
+                codec='libx264',
+                audio_codec='aac',
+                verbose=False,
+                logger=None,
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True
+            )
+            
+            # Clean up
+            video_clip.close()
+            audio_clip.close()
+            final_video.close()
+            
+            # Calculate processing time
+            processing_time = time.time() - start_time
+            
+            # Get metadata
+            metadata = self.extract_metadata_from_path(output_path)
+            
+            logger.info(f"MoviePy video creation completed: {output_filename}")
+            
+            return {
+                'success': True,
+                'output_file': output_filename,
+                'output_path': output_path,
+                'metadata': metadata,
+                'processing_time': round(processing_time, 2)
+            }
+            
+        except Exception as e:
+            logger.error(f"MoviePy method failed: {str(e)}")
             return {
                 'success': False,
-                'error': f'Video creation failed: {str(e)}'
+                'error': f'Video creation failed (both FFmpeg and MoviePy): {str(e)}'
             }
 
     def _add_subtitles_to_video(self, video_clip, subtitle_path: str):
         """
-        Add subtitles to video using SRT file
+        Add subtitles to video using SRT file (MoviePy method)
         """
         try:
-            # Parse SRT file
             subtitles = self._parse_srt_file(subtitle_path)
-            
             subtitle_clips = []
             
             for subtitle in subtitles:
-                # Create text clip for each subtitle
                 txt_clip = TextClip(
                     subtitle['text'],
                     fontsize=50,
@@ -198,7 +272,6 @@ class VideoProcessor:
                 
                 subtitle_clips.append(txt_clip)
             
-            # Composite video with subtitles
             if subtitle_clips:
                 final_video = CompositeVideoClip([video_clip] + subtitle_clips)
                 return final_video
@@ -219,20 +292,17 @@ class VideoProcessor:
             with open(subtitle_path, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
             
-            # Split by double newlines to separate subtitle blocks
             blocks = content.split('\n\n')
             
             for block in blocks:
                 lines = block.strip().split('\n')
                 if len(lines) >= 3:
-                    # Parse timestamp line (format: 00:00:01,000 --> 00:00:04,000)
                     timestamp_line = lines[1]
                     if ' --> ' in timestamp_line:
                         start_str, end_str = timestamp_line.split(' --> ')
                         start_time = self._srt_time_to_seconds(start_str)
                         end_time = self._srt_time_to_seconds(end_str)
                         
-                        # Get subtitle text (everything after the timestamp line)
                         text = '\n'.join(lines[2:])
                         
                         subtitles.append({
@@ -249,7 +319,7 @@ class VideoProcessor:
 
     def _srt_time_to_seconds(self, time_str: str) -> float:
         """
-        Convert SRT time format (HH:MM:SS,mmm) to seconds
+        Convert SRT time format to seconds
         """
         try:
             time_part, ms_part = time_str.split(',')
@@ -263,17 +333,15 @@ class VideoProcessor:
 
     def extract_metadata_from_path(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
-        Extract metadata from video file using direct path
+        Extract metadata from video file
         """
         try:
             if not os.path.exists(file_path):
                 logger.error(f"File not found: {file_path}")
                 return None
 
-            # Get video information using ffprobe
             probe = ffmpeg.probe(file_path)
             
-            # Find video stream
             video_stream = None
             audio_stream = None
             
@@ -287,7 +355,6 @@ class VideoProcessor:
                 logger.error("No video stream found in file")
                 return None
 
-            # Extract metadata
             metadata = {
                 'duration': float(probe['format'].get('duration', 0)),
                 'size': int(probe['format'].get('size', 0)),
@@ -303,7 +370,6 @@ class VideoProcessor:
                 }
             }
 
-            # Add audio metadata if available
             if audio_stream:
                 metadata['audio'] = {
                     'codec': audio_stream.get('codec_name', ''),
@@ -334,7 +400,6 @@ class VideoProcessor:
         Extract frame rate from video stream
         """
         try:
-            # Try r_frame_rate first
             if 'r_frame_rate' in video_stream:
                 fps_str = video_stream['r_frame_rate']
                 if '/' in fps_str:
@@ -342,7 +407,6 @@ class VideoProcessor:
                     return float(num) / float(den)
                 return float(fps_str)
             
-            # Fall back to avg_frame_rate
             if 'avg_frame_rate' in video_stream:
                 fps_str = video_stream['avg_frame_rate']
                 if '/' in fps_str:
@@ -369,7 +433,6 @@ class VideoProcessor:
                     'error': f'Input file not found: {filename}'
                 }
 
-            # Extract original metadata
             original_metadata = self.extract_metadata(filename)
             if not original_metadata:
                 return {
@@ -377,17 +440,14 @@ class VideoProcessor:
                     'error': 'Failed to extract video metadata'
                 }
 
-            # Generate output filename
             name, _ = os.path.splitext(filename)
             output_format = params.get('output_format', 'mp4')
             output_filename = f"{name}_processed.{output_format}"
             output_path = os.path.join(self.processed_folder, output_filename)
 
-            # Build FFmpeg command
             input_stream = ffmpeg.input(input_path)
             output_args = {}
 
-            # Set video codec based on output format
             if output_format in ['mp4', 'mov']:
                 output_args['vcodec'] = 'libx264'
                 output_args['acodec'] = 'aac'
@@ -398,39 +458,29 @@ class VideoProcessor:
                 output_args['vcodec'] = 'libx264'
                 output_args['acodec'] = 'mp3'
 
-            # Apply quality settings
             quality = params.get('quality', 'medium')
             if quality in self.quality_presets:
                 preset_settings = self.quality_presets[quality]
                 output_args['crf'] = preset_settings['crf']
                 output_args['preset'] = preset_settings['preset']
 
-            # Apply resolution scaling if specified
             resolution = params.get('resolution')
             if resolution and resolution in self.resolution_presets:
                 scale = self.resolution_presets[resolution]
                 input_stream = ffmpeg.filter(input_stream, 'scale', scale)
 
-            # Apply compression if requested
             if params.get('compress', False):
-                # Additional compression settings
                 output_args['crf'] = min(output_args.get('crf', 23) + 5, 32)
                 output_args['preset'] = 'fast'
 
-            # Create output stream
             output_stream = ffmpeg.output(input_stream, output_path, **output_args)
 
-            # Run FFmpeg command
             logger.info(f"Starting video processing: {filename} -> {output_filename}")
             ffmpeg.run(output_stream, overwrite_output=True, quiet=True)
 
-            # Calculate processing time
             processing_time = time.time() - start_time
-
-            # Get processed file metadata
             processed_metadata = self.extract_metadata(output_filename)
 
-            # Calculate file size reduction
             original_size = original_metadata.get('size', 0)
             processed_size = processed_metadata.get('size', 0) if processed_metadata else 0
             size_reduction = None
@@ -442,7 +492,6 @@ class VideoProcessor:
                     'reduction_percent': round(((original_size - processed_size) / original_size) * 100, 2)
                 }
 
-            # Clean up original file
             try:
                 os.remove(input_path)
             except:
