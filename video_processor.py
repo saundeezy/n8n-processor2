@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import ffmpeg
+import subprocess
 from typing import Dict, Optional, Any
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip
 
@@ -38,7 +39,6 @@ class VideoProcessor:
         Check if FFmpeg is available in the system
         """
         try:
-            import subprocess
             result = subprocess.run(['ffmpeg', '-version'], 
                                   capture_output=True, text=True, timeout=5)
             return result.returncode == 0
@@ -53,7 +53,7 @@ class VideoProcessor:
                                             subtitle_path: Optional[str] = None, 
                                             output_filename: str = "final_video.mp4") -> Dict[str, Any]:
         """
-        Create a final video by combining background video, audio, and subtitles
+        Create a final video using FFmpeg directly (more reliable than MoviePy)
         This is the main method your n8n workflow will use
         """
         start_time = time.time()
@@ -74,44 +74,68 @@ class VideoProcessor:
             logger.info(f"Audio: {audio_path}")
             logger.info(f"Subtitles: {subtitle_path}")
             
-            # Load video and audio
-            video_clip = VideoFileClip(background_video_path)
-            audio_clip = AudioFileClip(audio_path)
+            # Get audio duration using ffprobe
+            try:
+                audio_duration_cmd = [
+                    'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                    '-of', 'csv=p=0', audio_path
+                ]
+                audio_duration_result = subprocess.run(audio_duration_cmd, capture_output=True, text=True)
+                audio_duration = float(audio_duration_result.stdout.strip())
+                logger.info(f"Audio duration: {audio_duration} seconds")
+            except Exception as e:
+                logger.error(f"Failed to get audio duration: {str(e)}")
+                return {'success': False, 'error': f'Failed to analyze audio file: {str(e)}'}
             
-            # Get the duration of the audio (this will be our final video length)
-            audio_duration = audio_clip.duration
+            # Build FFmpeg command
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',  # Overwrite output files
+                '-stream_loop', '-1',  # Loop video indefinitely
+                '-i', background_video_path,  # Background video input
+                '-i', audio_path,  # Audio input
+                '-t', str(audio_duration),  # Duration = audio length
+                '-c:v', 'libx264',  # Video codec
+                '-c:a', 'aac',  # Audio codec
+                '-r', '24',  # Frame rate (fixes the video_fps issue)
+                '-map', '0:v:0',  # Use video from first input
+                '-map', '1:a:0',  # Use audio from second input
+                '-shortest',  # Stop when shortest stream ends
+                '-preset', 'fast',  # Fast encoding
+                '-crf', '23',  # Good quality
+            ]
             
-            # Loop the background video if it's shorter than the audio
-            if video_clip.duration < audio_duration:
-                # Calculate how many times we need to loop
-                loop_count = int(audio_duration / video_clip.duration) + 1
-                video_clip = video_clip.loop(n=loop_count)
-            
-            # Cut the video to match audio duration
-            video_clip = video_clip.subclip(0, audio_duration)
-            
-            # Replace the video's audio with our narration
-            final_video = video_clip.set_audio(audio_clip)
-            
-            # Add subtitles if provided
+            # Add subtitle support if subtitle file exists
             if subtitle_path and os.path.exists(subtitle_path):
-                final_video = self._add_subtitles_to_video(final_video, subtitle_path)
+                logger.info(f"Adding subtitles from: {subtitle_path}")
+                # Add subtitle burning using FFmpeg - positioned for social media
+                # MarginV=150 moves subtitles up from bottom to avoid UI elements
+                ffmpeg_cmd.extend([
+                    '-vf', f"subtitles='{subtitle_path}':force_style='FontSize=28,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=3,Bold=1,MarginV=150,Alignment=2'",
+                ])
             
-            final_video.write_videofile(
-    output_path,
-    codec='libx264',
-    audio_codec='aac',
-    fps=24,  # Add explicit FPS - this fixes the video_fps error
-    temp_audiofile='temp-audio.m4a',
-    remove_temp=True,
-    verbose=False,
-    logger=None
-)
+            # Add output path at the end
+            ffmpeg_cmd.append(output_path)
             
-            # Clean up
-            video_clip.close()
-            audio_clip.close()
-            final_video.close()
+            logger.info(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
+            
+            # Run FFmpeg
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
+            
+            if result.returncode != 0:
+                logger.error(f"FFmpeg error (return code {result.returncode}): {result.stderr}")
+                return {
+                    'success': False,
+                    'error': f'Video processing failed: {result.stderr}'
+                }
+            
+            logger.info("FFmpeg processing completed successfully")
+            
+            # Verify output file was created
+            if not os.path.exists(output_path):
+                return {
+                    'success': False,
+                    'error': 'Output video file was not created'
+                }
             
             # Calculate processing time
             processing_time = time.time() - start_time
@@ -119,7 +143,7 @@ class VideoProcessor:
             # Get metadata of the final video
             metadata = self.extract_metadata_from_path(output_path)
             
-            logger.info(f"Video creation completed: {output_filename}")
+            logger.info(f"Video creation completed: {output_filename} (took {processing_time:.2f}s)")
             
             return {
                 'success': True,
@@ -129,6 +153,12 @@ class VideoProcessor:
                 'processing_time': round(processing_time, 2)
             }
             
+        except subprocess.TimeoutExpired:
+            logger.error("FFmpeg processing timed out")
+            return {
+                'success': False,
+                'error': 'Video processing timed out (>5 minutes)'
+            }
         except Exception as e:
             logger.error(f"Error creating video: {str(e)}")
             return {
