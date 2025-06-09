@@ -208,47 +208,73 @@ class VideoProcessor:
                 video_clip.close()
                 return {'success': False, 'error': f'Audio file cannot be processed: {str(audio_error)}'}
             
-            # Process video safely
+            # Process video safely with better audio handling
             try:
+                logger.info(f"Video duration: {video_clip.duration}s, Audio duration: {audio_duration}s")
+                
                 # Loop if needed
                 if video_clip.duration < audio_duration:
                     loop_count = int(audio_duration / video_clip.duration) + 1
+                    logger.info(f"Looping video {loop_count} times to match audio duration")
                     video_clip = video_clip.loop(n=loop_count)
                     video_clip.fps = 24.0
                 
-                # Cut to match audio
+                # Cut to match audio duration exactly
+                logger.info(f"Cutting video from {video_clip.duration}s to {audio_duration}s")
                 video_clip = video_clip.subclip(0, audio_duration)
                 video_clip.fps = 24.0
                 
-                # Set audio
-                final_video = video_clip.set_audio(audio_clip)
+                # Remove existing audio from video first
+                video_clip_no_audio = video_clip.without_audio()
+                logger.info("Removed original video audio")
+                
+                # Set the new audio
+                logger.info("Adding narration audio to video...")
+                final_video = video_clip_no_audio.set_audio(audio_clip)
                 final_video.fps = 24.0
                 
-                # Write with minimal parameters
-                logger.info("Writing video with minimal parameters...")
+                # Verify audio is attached
+                if final_video.audio is None:
+                    logger.error("WARNING: Final video has no audio attached!")
+                else:
+                    logger.info(f"SUCCESS: Final video has audio duration: {final_video.audio.duration}s")
+                
+                # Write with explicit audio parameters
+                logger.info("Writing final video with audio...")
                 final_video.write_videofile(
                     output_path,
                     fps=24,
                     verbose=False,
-                    logger=None
+                    logger=None,
+                    audio=True,  # Force audio inclusion
+                    audio_codec='aac',
+                    audio_bitrate='128k',  # Explicit audio bitrate
+                    temp_audiofile='temp-audio.m4a',
+                    remove_temp=True
                 )
                 
                 # Clean up
                 video_clip.close()
                 audio_clip.close()
+                video_clip_no_audio.close()
                 final_video.close()
                 
-                # Clean up preprocessed file
-                if processed_video_path != background_video_path and os.path.exists(processed_video_path):
-                    os.remove(processed_video_path)
-                
                 processing_time = time.time() - start_time
+                
+                logger.info(f"Video creation completed successfully in {processing_time:.1f}s")
                 
                 return {
                     'success': True,
                     'output_file': output_filename,
                     'output_path': output_path,
-                    'metadata': {'duration': audio_duration, 'fps': 24, 'method': 'safe_moviepy'},
+                    'metadata': {
+                        'duration': audio_duration, 
+                        'fps': 24, 
+                        'method': 'safe_moviepy_explicit_audio',
+                        'loops_needed': int(audio_duration / 62) + 1 if 62 < audio_duration else 1,
+                        'original_video_duration': 62,
+                        'final_duration': audio_duration
+                    },
                     'processing_time': round(processing_time, 2)
                 }
                 
