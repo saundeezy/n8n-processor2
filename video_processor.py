@@ -97,16 +97,16 @@ class VideoProcessor:
             if subtitle_path and os.path.exists(subtitle_path):
                 final_video = self._add_subtitles_to_video(final_video, subtitle_path)
             
-            # Write the final video
             final_video.write_videofile(
-                output_path,
-                codec='libx264',
-                audio_codec='aac',
-                temp_audiofile='temp-audio.m4a',
-                remove_temp=True,
-                verbose=False,
-                logger=None  # Suppress moviepy logs
-            )
+    output_path,
+    codec='libx264',
+    audio_codec='aac',
+    fps=24,  # Add explicit FPS - this fixes the video_fps error
+    temp_audiofile='temp-audio.m4a',
+    remove_temp=True,
+    verbose=False,
+    logger=None
+)
             
             # Clean up
             video_clip.close()
