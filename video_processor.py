@@ -53,7 +53,7 @@ class VideoProcessor:
                                             subtitle_path: Optional[str] = None, 
                                             output_filename: str = "final_video.mp4") -> Dict[str, Any]:
         """
-        Create a final video - try FFmpeg first, fallback to MoviePy
+        Create a final video - bypass MoviePy entirely if it fails
         """
         start_time = time.time()
         
@@ -73,7 +73,7 @@ class VideoProcessor:
             logger.info(f"Audio: {audio_path}")
             logger.info(f"Subtitles: {subtitle_path}")
             
-            # Get audio duration using MoviePy
+            # Get audio duration using MoviePy (this should work)
             try:
                 temp_audio = AudioFileClip(audio_path)
                 audio_duration = temp_audio.duration
@@ -84,15 +84,18 @@ class VideoProcessor:
                 audio_duration = 60.0
                 logger.warning(f"Using fallback duration of {audio_duration} seconds")
             
-            # Try FFmpeg first
-            if self.check_ffmpeg_availability():
-                logger.info("FFmpeg available, using FFmpeg method")
-                return self._create_video_with_ffmpeg(background_video_path, audio_path, 
-                                                    subtitle_path, output_filename, 
-                                                    audio_duration, start_time)
-            else:
-                logger.info("FFmpeg not available, using MoviePy method")
-                return self._create_video_with_moviepy(background_video_path, audio_path, 
+            # Try direct FFmpeg approach first (bypass MoviePy completely for video)
+            logger.info("Attempting direct FFmpeg approach...")
+            try:
+                return self._create_video_direct_ffmpeg(background_video_path, audio_path, 
+                                                      subtitle_path, output_filename, 
+                                                      audio_duration, start_time)
+            except Exception as ffmpeg_error:
+                logger.warning(f"Direct FFmpeg failed: {str(ffmpeg_error)}")
+                
+                # Last resort: Try the safest MoviePy approach possible
+                logger.info("Trying ultra-safe MoviePy approach...")
+                return self._create_video_safe_moviepy(background_video_path, audio_path, 
                                                      subtitle_path, output_filename, 
                                                      audio_duration, start_time)
             
@@ -102,6 +105,201 @@ class VideoProcessor:
                 'success': False,
                 'error': f'Video creation failed: {str(e)}'
             }
+
+    def _create_video_direct_ffmpeg(self, background_video_path: str, audio_path: str, 
+                                  subtitle_path: Optional[str], output_filename: str, 
+                                  audio_duration: float, start_time: float) -> Dict[str, Any]:
+        """
+        Use FFmpeg directly without MoviePy at all
+        """
+        try:
+            logger.info("Using direct FFmpeg approach (no MoviePy)")
+            
+            output_path = os.path.join(self.processed_folder, output_filename)
+            
+            # Check if ffmpeg is available
+            try:
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                raise Exception("FFmpeg not available")
+            
+            # Build FFmpeg command that handles any video input
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',  # Overwrite output files
+                '-stream_loop', '-1',  # Loop video indefinitely
+                '-i', background_video_path,  # Background video input
+                '-i', audio_path,  # Audio input
+                '-t', str(audio_duration),  # Duration = audio length
+                '-c:v', 'libx264',  # Video codec
+                '-c:a', 'aac',  # Audio codec
+                '-r', '24',  # Explicit frame rate (fixes broken FPS)
+                '-vsync', 'cfr',  # Constant frame rate
+                '-map', '0:v:0',  # Use video from first input
+                '-map', '1:a:0',  # Use audio from second input
+                '-shortest',  # Stop when shortest stream ends
+                '-preset', 'ultrafast',  # Fast encoding
+                '-crf', '28',  # Reasonable quality
+                output_path
+            ]
+            
+            logger.info(f"Running direct FFmpeg: {' '.join(ffmpeg_cmd)}")
+            
+            # Run FFmpeg
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode != 0:
+                logger.error(f"FFmpeg error: {result.stderr}")
+                raise Exception(f"FFmpeg failed: {result.stderr}")
+            
+            # Verify output file was created
+            if not os.path.exists(output_path):
+                raise Exception('Output video file was not created')
+            
+            # Calculate processing time
+            processing_time = time.time() - start_time
+            
+            logger.info(f"Direct FFmpeg video creation completed: {output_filename}")
+            
+            return {
+                'success': True,
+                'output_file': output_filename,
+                'output_path': output_path,
+                'metadata': {'duration': audio_duration, 'fps': 24, 'method': 'direct_ffmpeg'},
+                'processing_time': round(processing_time, 2)
+            }
+            
+        except Exception as e:
+            logger.error(f"Direct FFmpeg method failed: {str(e)}")
+            raise e
+
+    def _create_video_safe_moviepy(self, background_video_path: str, audio_path: str, 
+                                 subtitle_path: Optional[str], output_filename: str, 
+                                 audio_duration: float, start_time: float) -> Dict[str, Any]:
+        """
+        Ultra-safe MoviePy approach that pre-processes the video
+        """
+        try:
+            logger.info("Using ultra-safe MoviePy approach")
+            
+            output_path = os.path.join(self.processed_folder, output_filename)
+            
+            # Pre-process the video file to fix any issues
+            processed_video_path = self._preprocess_video_file(background_video_path)
+            
+            # Now try loading with MoviePy
+            try:
+                logger.info("Loading preprocessed video...")
+                
+                # Load video with explicit parameters to avoid FPS issues
+                video_clip = VideoFileClip(processed_video_path, audio=False)  # Don't load audio
+                
+                # Force set FPS immediately
+                video_clip.fps = 24.0
+                logger.info(f"Video loaded and FPS set to: {video_clip.fps}")
+                
+            except Exception as video_error:
+                logger.error(f"Failed to load even preprocessed video: {str(video_error)}")
+                return {'success': False, 'error': f'Video file cannot be processed: {str(video_error)}'}
+            
+            # Load audio separately
+            try:
+                audio_clip = AudioFileClip(audio_path)
+            except Exception as audio_error:
+                video_clip.close()
+                return {'success': False, 'error': f'Audio file cannot be processed: {str(audio_error)}'}
+            
+            # Process video safely
+            try:
+                # Loop if needed
+                if video_clip.duration < audio_duration:
+                    loop_count = int(audio_duration / video_clip.duration) + 1
+                    video_clip = video_clip.loop(n=loop_count)
+                    video_clip.fps = 24.0
+                
+                # Cut to match audio
+                video_clip = video_clip.subclip(0, audio_duration)
+                video_clip.fps = 24.0
+                
+                # Set audio
+                final_video = video_clip.set_audio(audio_clip)
+                final_video.fps = 24.0
+                
+                # Write with minimal parameters
+                logger.info("Writing video with minimal parameters...")
+                final_video.write_videofile(
+                    output_path,
+                    fps=24,
+                    verbose=False,
+                    logger=None
+                )
+                
+                # Clean up
+                video_clip.close()
+                audio_clip.close()
+                final_video.close()
+                
+                # Clean up preprocessed file
+                if processed_video_path != background_video_path and os.path.exists(processed_video_path):
+                    os.remove(processed_video_path)
+                
+                processing_time = time.time() - start_time
+                
+                return {
+                    'success': True,
+                    'output_file': output_filename,
+                    'output_path': output_path,
+                    'metadata': {'duration': audio_duration, 'fps': 24, 'method': 'safe_moviepy'},
+                    'processing_time': round(processing_time, 2)
+                }
+                
+            except Exception as processing_error:
+                logger.error(f"Video processing failed: {str(processing_error)}")
+                return {'success': False, 'error': f'Video processing failed: {str(processing_error)}'}
+            
+        except Exception as e:
+            logger.error(f"Safe MoviePy method failed: {str(e)}")
+            return {'success': False, 'error': f'Safe MoviePy failed: {str(e)}'}
+
+    def _preprocess_video_file(self, video_path: str) -> str:
+        """
+        Pre-process video file to fix metadata issues
+        """
+        try:
+            logger.info("Pre-processing video file to fix metadata...")
+            
+            # Create output path for processed file
+            processed_path = video_path.replace('.', '_processed.')
+            
+            # Try using ffmpeg to fix the video
+            try:
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=2)
+                
+                # Simple re-encode to fix metadata
+                cmd = [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-c:v', 'copy',  # Copy video stream (faster)
+                    '-c:a', 'copy',  # Copy audio stream
+                    '-r', '24',      # Set explicit frame rate
+                    '-avoid_negative_ts', 'make_zero',  # Fix timing issues
+                    processed_path
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                
+                if result.returncode == 0 and os.path.exists(processed_path):
+                    logger.info("Video preprocessed successfully")
+                    return processed_path
+                    
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                logger.info("FFmpeg not available for preprocessing")
+            
+            # If FFmpeg fails, return original file
+            logger.info("Using original video file")
+            return video_path
+            
+        except Exception as e:
+            logger.warning(f"Video preprocessing failed: {str(e)}")
+            return video_path
 
     def _create_video_with_ffmpeg(self, background_video_path: str, audio_path: str, 
                                  subtitle_path: Optional[str], output_filename: str, 
