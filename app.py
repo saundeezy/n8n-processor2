@@ -307,4 +307,121 @@ def download_file(filename):
     Download processed video files
     """
     try:
-        file_path = os.path.join(app.config['PROCESSED_FOLDER
+        file_path = os.path.join(app.config['PROCESSED_FOLDER'], filename)
+        if os.path.exists(file_path):
+            return send_file(file_path, as_attachment=True)
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'File not found',
+                'timestamp': datetime.utcnow().isoformat()
+            }), 404
+    except Exception as e:
+        logger.error(f"Error downloading file {filename}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Download failed',
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
+        
+@app.route('/webhook/execute-script', methods=['POST'])
+def execute_script_webhook():
+    """
+    Webhook endpoint for executing bash scripts from n8n
+    """
+    try:
+        if not request.is_json:
+            return jsonify({
+                'success': False,
+                'error': 'Request must contain JSON data',
+                'timestamp': datetime.utcnow().isoformat()
+            }), 400
+
+        data = request.get_json()
+
+        if 'script' not in data:
+            return jsonify({
+                'success': False,
+                'error': 'No script provided',
+                'timestamp': datetime.utcnow().isoformat()
+            }), 400
+
+        script_content = data['script']
+        unique_id = str(uuid.uuid4())
+        script_filename = f"script_{unique_id}.sh"
+        script_path = os.path.join('/tmp', script_filename)
+
+        with open(script_path, 'w') as f:
+            f.write(script_content)
+
+        os.chmod(script_path, 0o755)
+
+        result = subprocess.run(['bash', script_path], capture_output=True, text=True, timeout=600)
+
+        os.remove(script_path)
+
+        if result.returncode == 0:
+            return jsonify({
+                'success': True,
+                'job_id': unique_id,
+                'output': result.stdout,
+                'video_path': '/tmp/n8n/simple_video/final_output.mp4',
+                'timestamp': datetime.utcnow().isoformat()
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'error': f'Script failed with code {result.returncode}',
+                'output': result.stdout,
+                'error_output': result.stderr,
+                'timestamp': datetime.utcnow().isoformat()
+            }), 500
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    Health check endpoint for monitoring
+    """
+    return jsonify({
+        'status': 'healthy',
+        'service': 'video-processing-webhook',
+        'timestamp': datetime.utcnow().isoformat(),
+        'ffmpeg_available': video_processor.check_ffmpeg_availability()
+    }), 200
+
+@app.errorhandler(413)
+def too_large(e):
+    """Handle file too large errors"""
+    return jsonify({
+        'success': False,
+        'error': 'File too large. Maximum size is 500MB.',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 413
+
+@app.errorhandler(404)
+def not_found(e):
+    """Handle 404 errors"""
+    return jsonify({
+        'success': False,
+        'error': 'Endpoint not found',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 404
+
+@app.errorhandler(500)
+def internal_error(e):
+    """Handle 500 errors"""
+    return jsonify({
+        'success': False,
+        'error': 'Internal server error',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
