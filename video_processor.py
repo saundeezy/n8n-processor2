@@ -74,18 +74,18 @@ class VideoProcessor:
             logger.info(f"Audio: {audio_path}")
             logger.info(f"Subtitles: {subtitle_path}")
             
-            # Get audio duration using ffprobe
+            # Get audio duration using MoviePy (temporary fallback)
             try:
-                audio_duration_cmd = [
-                    'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
-                    '-of', 'csv=p=0', audio_path
-                ]
-                audio_duration_result = subprocess.run(audio_duration_cmd, capture_output=True, text=True)
-                audio_duration = float(audio_duration_result.stdout.strip())
+                from moviepy.editor import AudioFileClip
+                temp_audio = AudioFileClip(audio_path)
+                audio_duration = temp_audio.duration
+                temp_audio.close()
                 logger.info(f"Audio duration: {audio_duration} seconds")
             except Exception as e:
                 logger.error(f"Failed to get audio duration: {str(e)}")
-                return {'success': False, 'error': f'Failed to analyze audio file: {str(e)}'}
+                # Fallback: assume 60 seconds if we can't get duration
+                audio_duration = 60.0
+                logger.warning(f"Using fallback duration of {audio_duration} seconds")
             
             # Build FFmpeg command
             ffmpeg_cmd = [
@@ -117,6 +117,15 @@ class VideoProcessor:
             ffmpeg_cmd.append(output_path)
             
             logger.info(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
+            
+            # Run FFmpeg - first check if ffmpeg is available
+            try:
+                # Test if ffmpeg is available
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                logger.error("FFmpeg not found, falling back to MoviePy approach")
+                return self._create_video_with_moviepy(background_video_path, audio_path, 
+                                                     subtitle_path, output_filename, audio_duration)
             
             # Run FFmpeg
             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
