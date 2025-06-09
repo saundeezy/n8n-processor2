@@ -110,7 +110,7 @@ class VideoProcessor:
                                   subtitle_path: Optional[str], output_filename: str, 
                                   audio_duration: float, start_time: float) -> Dict[str, Any]:
         """
-        Use FFmpeg directly without MoviePy at all
+        Use FFmpeg directly without MoviePy at all - WITH ASS SUBTITLE SUPPORT
         """
         try:
             logger.info("Using direct FFmpeg approach (no MoviePy)")
@@ -139,8 +139,21 @@ class VideoProcessor:
                 '-shortest',  # Stop when shortest stream ends
                 '-preset', 'ultrafast',  # Fast encoding
                 '-crf', '28',  # Reasonable quality
-                output_path
             ]
+            
+            # ADD SUBTITLE SUPPORT HERE - ONLY IF SUBTITLE FILE EXISTS
+            if subtitle_path and os.path.exists(subtitle_path):
+                logger.info(f"Adding ASS subtitles from: {subtitle_path}")
+                # For ASS files, use the ass filter (better than subtitles filter for ASS)
+                # Escape the path for FFmpeg to handle spaces and special characters
+                escaped_subtitle_path = subtitle_path.replace('\\', '\\\\').replace(':', '\\:').replace("'", "\\'")
+                ffmpeg_cmd.extend(['-vf', f'ass={escaped_subtitle_path}'])
+                logger.info(f"Subtitle filter added: ass={escaped_subtitle_path}")
+            else:
+                logger.info("No subtitles provided or subtitle file not found")
+            
+            # Add output path at the end
+            ffmpeg_cmd.append(output_path)
             
             logger.info(f"Running direct FFmpeg: {' '.join(ffmpeg_cmd)}")
             
@@ -164,7 +177,12 @@ class VideoProcessor:
                 'success': True,
                 'output_file': output_filename,
                 'output_path': output_path,
-                'metadata': {'duration': audio_duration, 'fps': 24, 'method': 'direct_ffmpeg'},
+                'metadata': {
+                    'duration': audio_duration, 
+                    'fps': 24, 
+                    'method': 'direct_ffmpeg',
+                    'subtitles_applied': subtitle_path is not None and os.path.exists(subtitle_path)
+                },
                 'processing_time': round(processing_time, 2)
             }
             
@@ -273,7 +291,8 @@ class VideoProcessor:
                         'method': 'safe_moviepy_explicit_audio',
                         'loops_needed': int(audio_duration / 62) + 1 if 62 < audio_duration else 1,
                         'original_video_duration': 62,
-                        'final_duration': audio_duration
+                        'final_duration': audio_duration,
+                        'subtitles_applied': subtitle_path is not None and os.path.exists(subtitle_path)
                     },
                     'processing_time': round(processing_time, 2)
                 }
@@ -356,9 +375,9 @@ class VideoProcessor:
             # Add subtitle support if subtitle file exists
             if subtitle_path and os.path.exists(subtitle_path):
                 logger.info(f"Adding subtitles from: {subtitle_path}")
-                ffmpeg_cmd.extend([
-                    '-vf', f"subtitles='{subtitle_path}':force_style='FontSize=28,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=3,Bold=1,MarginV=150,Alignment=2'",
-                ])
+                # Use the ass filter for ASS files for better compatibility
+                escaped_subtitle_path = subtitle_path.replace('\\', '\\\\').replace(':', '\\:').replace("'", "\\'")
+                ffmpeg_cmd.extend(['-vf', f'ass={escaped_subtitle_path}'])
             
             # Add output path at the end
             ffmpeg_cmd.append(output_path)
