@@ -90,7 +90,7 @@ def create_story_video():
             saved_files['background_video'] = video_path
             logger.info(f"Saved background video: {video_path}")
         
-        # Save subtitle file (optional)
+        # Save subtitle file (optional) - ADDED SUBTITLE SUPPORT
         subtitle_path = None
         if 'subtitles' in request.files:
             subtitle_file = request.files['subtitles']
@@ -100,15 +100,28 @@ def create_story_video():
                 subtitle_file.save(subtitle_path)
                 saved_files['subtitles'] = subtitle_path
                 logger.info(f"Saved subtitle file: {subtitle_path}")
+                
+                # Debug: Check subtitle file content
+                try:
+                    with open(subtitle_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        logger.info(f"Subtitle file size: {len(content)} characters")
+                        logger.info(f"First 200 chars: {content[:200]}")
+                except Exception as e:
+                    logger.warning(f"Error reading subtitle file: {e}")
+            else:
+                logger.info("Subtitle file uploaded but has no filename")
+        else:
+            logger.info("No subtitle file provided in request")
         
         # Generate output filename
         output_filename = f"{job_id}_final_story_video.mp4"
         
-        # Create the final video
+        # Create the final video - PASS SUBTITLE PATH
         result = video_processor.create_video_with_audio_and_subtitles(
             background_video_path=saved_files['background_video'],
             audio_path=saved_files['audio'],
-            subtitle_path=subtitle_path,
+            subtitle_path=subtitle_path,  # This now gets passed through
             output_filename=output_filename
         )
         
@@ -130,6 +143,7 @@ def create_story_video():
                 'metadata': result['metadata'],
                 'processing_time': result['processing_time'],
                 'download_url': f"/download/{result['output_file']}",
+                'subtitles_applied': subtitle_path is not None,  # Added for debugging
                 'timestamp': datetime.utcnow().isoformat()
             }), 200
         else:
