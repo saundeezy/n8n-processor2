@@ -180,17 +180,21 @@ class VideoProcessor:
                                   subtitle_path: Optional[str], output_filename: str, 
                                   audio_duration: float, start_time: float) -> Dict[str, Any]:
         """
-        Create video using MoviePy with explicit FPS handling
+        Create video using MoviePy with video file repair
         """
         try:
             logger.info("Using MoviePy for video creation")
             
             output_path = os.path.join(self.processed_folder, output_filename)
             
-            # Load clips with explicit error handling
+            # STEP 1: Fix the background video file first
+            logger.info("Fixing background video FPS metadata...")
+            fixed_video_path = self._fix_video_fps(background_video_path)
+            
+            # STEP 2: Load clips with explicit error handling
             try:
-                logger.info("Loading video clip...")
-                video_clip = VideoFileClip(background_video_path)
+                logger.info("Loading fixed video clip...")
+                video_clip = VideoFileClip(fixed_video_path)
                 logger.info(f"Video clip loaded: duration={video_clip.duration}, fps={video_clip.fps}")
             except Exception as e:
                 logger.error(f"Failed to load video clip: {str(e)}")
@@ -205,9 +209,9 @@ class VideoProcessor:
                 video_clip.close()
                 return {'success': False, 'error': f'Failed to load audio: {str(e)}'}
             
-            # CRITICAL: Force set FPS before any operations
+            # STEP 3: Ensure video has proper FPS
             try:
-                logger.info("Setting explicit FPS...")
+                logger.info("Ensuring video has proper FPS...")
                 if not hasattr(video_clip, 'fps') or video_clip.fps is None or video_clip.fps == 0:
                     video_clip.fps = 24.0
                     logger.info("Set video FPS to 24.0")
@@ -219,22 +223,20 @@ class VideoProcessor:
                 
             except Exception as e:
                 logger.error(f"Failed to set FPS: {str(e)}")
-                # Force set to 24
                 video_clip.fps = 24.0
             
-            # Loop the video if needed
+            # STEP 4: Loop the video if needed
             try:
                 if video_clip.duration < audio_duration:
                     loop_count = int(audio_duration / video_clip.duration) + 1
                     logger.info(f"Looping video {loop_count} times")
                     video_clip = video_clip.loop(n=loop_count)
-                    # Re-set FPS after looping
                     video_clip.fps = 24.0
             except Exception as e:
                 logger.error(f"Failed to loop video: {str(e)}")
                 return {'success': False, 'error': f'Video looping failed: {str(e)}'}
             
-            # Cut video to match audio duration
+            # STEP 5: Cut video to match audio duration
             try:
                 logger.info("Cutting video to match audio duration...")
                 video_clip = video_clip.subclip(0, audio_duration)
@@ -243,7 +245,7 @@ class VideoProcessor:
                 logger.error(f"Failed to cut video: {str(e)}")
                 return {'success': False, 'error': f'Video cutting failed: {str(e)}'}
             
-            # Set audio
+            # STEP 6: Set audio
             try:
                 logger.info("Setting audio...")
                 final_video = video_clip.set_audio(audio_clip)
@@ -252,53 +254,32 @@ class VideoProcessor:
                 logger.error(f"Failed to set audio: {str(e)}")
                 return {'success': False, 'error': f'Audio setting failed: {str(e)}'}
             
-            # Write video with minimal parameters to avoid FPS issues
+            # STEP 7: Write video with fallback methods
             try:
-                logger.info("Writing video file with minimal parameters...")
+                logger.info("Writing video file...")
                 final_video.write_videofile(
                     output_path,
-                    fps=24.0,  # Explicit float FPS
+                    fps=24.0,
                     verbose=False,
                     logger=None,
-                    audio=True,  # Ensure audio is included
+                    audio=True,
                     temp_audiofile='temp-audio.m4a',
                     remove_temp=True
                 )
                 logger.info("Video file written successfully")
                 
             except Exception as write_error:
-                logger.error(f"First write attempt failed: {str(write_error)}")
-                
-                # Try alternative write method
-                try:
-                    logger.info("Trying alternative write method...")
-                    final_video.write_videofile(
-                        output_path,
-                        fps=24,  # Try integer instead of float
-                        codec='libx264',
-                        verbose=False,
-                        logger=None
-                    )
-                    logger.info("Alternative write method succeeded")
-                    
-                except Exception as second_error:
-                    logger.error(f"Second write attempt failed: {str(second_error)}")
-                    
-                    # Try most basic write
-                    try:
-                        logger.info("Trying most basic write method...")
-                        final_video.write_videofile(output_path, verbose=False, logger=None)
-                        logger.info("Basic write method succeeded")
-                        
-                    except Exception as final_error:
-                        logger.error(f"All write attempts failed: {str(final_error)}")
-                        return {'success': False, 'error': f'Video writing failed: {str(final_error)}'}
+                logger.error(f"Write attempt failed: {str(write_error)}")
+                return {'success': False, 'error': f'Video writing failed: {str(write_error)}'}
             
-            # Clean up
+            # STEP 8: Clean up
             try:
                 video_clip.close()
                 audio_clip.close()
                 final_video.close()
+                # Clean up the fixed video file
+                if fixed_video_path != background_video_path and os.path.exists(fixed_video_path):
+                    os.remove(fixed_video_path)
             except Exception as cleanup_error:
                 logger.warning(f"Cleanup warning: {str(cleanup_error)}")
             
@@ -327,6 +308,45 @@ class VideoProcessor:
                 'success': False,
                 'error': f'Video creation failed: {str(e)}'
             }
+
+    def _fix_video_fps(self, video_path: str) -> str:
+        """
+        Fix video file by re-encoding it with proper FPS metadata
+        """
+        try:
+            logger.info(f"Fixing FPS metadata for: {video_path}")
+            
+            # Create a fixed version using a simple re-encode
+            fixed_path = video_path.replace('.', '_fixed.')
+            
+            # Try using subprocess to re-encode with ffmpeg if available
+            try:
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=2)
+                
+                # Re-encode the video with explicit FPS
+                cmd = [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-c:v', 'libx264', '-r', '24', '-preset', 'ultrafast',
+                    '-c:a', 'copy',  # Copy audio without re-encoding
+                    fixed_path
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                
+                if result.returncode == 0 and os.path.exists(fixed_path):
+                    logger.info("Video fixed successfully with ffmpeg")
+                    return fixed_path
+                else:
+                    logger.warning("FFmpeg fix failed, using original file")
+                    return video_path
+                    
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                logger.info("FFmpeg not available for video fixing")
+                return video_path
+                
+        except Exception as e:
+            logger.warning(f"Video fixing failed: {str(e)}, using original file")
+            return video_path
 
     def _add_subtitles_to_video(self, video_clip, subtitle_path: str):
         """
