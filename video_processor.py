@@ -3,12 +3,13 @@ import time
 import logging
 import ffmpeg
 from typing import Dict, Optional, Any
+from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip
 
 logger = logging.getLogger(__name__)
 
 class VideoProcessor:
     """
-    Handles video processing operations using FFmpeg
+    Handles video processing operations using FFmpeg and MoviePy
     """
     
     def __init__(self, upload_folder: str, processed_folder: str):
@@ -48,13 +49,184 @@ class VideoProcessor:
             logger.error(f"Error checking FFmpeg availability: {str(e)}")
             return False
 
-    def extract_metadata(self, filename: str) -> Optional[Dict[str, Any]]:
+    def create_video_with_audio_and_subtitles(self, background_video_path: str, audio_path: str, 
+                                            subtitle_path: Optional[str] = None, 
+                                            output_filename: str = "final_video.mp4") -> Dict[str, Any]:
         """
-        Extract metadata from video file
+        Create a final video by combining background video, audio, and subtitles
+        This is the main method your n8n workflow will use
+        """
+        start_time = time.time()
+        
+        try:
+            # Ensure all input files exist
+            if not os.path.exists(background_video_path):
+                return {'success': False, 'error': f'Background video not found: {background_video_path}'}
+            
+            if not os.path.exists(audio_path):
+                return {'success': False, 'error': f'Audio file not found: {audio_path}'}
+            
+            # Create output path
+            output_path = os.path.join(self.processed_folder, output_filename)
+            
+            logger.info(f"Creating video: {output_filename}")
+            logger.info(f"Background video: {background_video_path}")
+            logger.info(f"Audio: {audio_path}")
+            logger.info(f"Subtitles: {subtitle_path}")
+            
+            # Load video and audio
+            video_clip = VideoFileClip(background_video_path)
+            audio_clip = AudioFileClip(audio_path)
+            
+            # Get the duration of the audio (this will be our final video length)
+            audio_duration = audio_clip.duration
+            
+            # Loop the background video if it's shorter than the audio
+            if video_clip.duration < audio_duration:
+                # Calculate how many times we need to loop
+                loop_count = int(audio_duration / video_clip.duration) + 1
+                video_clip = video_clip.loop(n=loop_count)
+            
+            # Cut the video to match audio duration
+            video_clip = video_clip.subclip(0, audio_duration)
+            
+            # Replace the video's audio with our narration
+            final_video = video_clip.set_audio(audio_clip)
+            
+            # Add subtitles if provided
+            if subtitle_path and os.path.exists(subtitle_path):
+                final_video = self._add_subtitles_to_video(final_video, subtitle_path)
+            
+            # Write the final video
+            final_video.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True,
+                verbose=False,
+                logger=None  # Suppress moviepy logs
+            )
+            
+            # Clean up
+            video_clip.close()
+            audio_clip.close()
+            final_video.close()
+            
+            # Calculate processing time
+            processing_time = time.time() - start_time
+            
+            # Get metadata of the final video
+            metadata = self.extract_metadata_from_path(output_path)
+            
+            logger.info(f"Video creation completed: {output_filename}")
+            
+            return {
+                'success': True,
+                'output_file': output_filename,
+                'output_path': output_path,
+                'metadata': metadata,
+                'processing_time': round(processing_time, 2)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating video: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Video creation failed: {str(e)}'
+            }
+
+    def _add_subtitles_to_video(self, video_clip, subtitle_path: str):
+        """
+        Add subtitles to video using SRT file
         """
         try:
-            file_path = os.path.join(self.upload_folder, filename)
+            # Parse SRT file
+            subtitles = self._parse_srt_file(subtitle_path)
             
+            subtitle_clips = []
+            
+            for subtitle in subtitles:
+                # Create text clip for each subtitle
+                txt_clip = TextClip(
+                    subtitle['text'],
+                    fontsize=50,
+                    color='white',
+                    stroke_color='black',
+                    stroke_width=2,
+                    font='Arial-Bold'
+                ).set_position(('center', 'bottom')).set_start(subtitle['start']).set_end(subtitle['end'])
+                
+                subtitle_clips.append(txt_clip)
+            
+            # Composite video with subtitles
+            if subtitle_clips:
+                final_video = CompositeVideoClip([video_clip] + subtitle_clips)
+                return final_video
+            else:
+                return video_clip
+                
+        except Exception as e:
+            logger.warning(f"Failed to add subtitles: {str(e)}")
+            return video_clip
+
+    def _parse_srt_file(self, subtitle_path: str) -> list:
+        """
+        Parse SRT subtitle file
+        """
+        subtitles = []
+        
+        try:
+            with open(subtitle_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            # Split by double newlines to separate subtitle blocks
+            blocks = content.split('\n\n')
+            
+            for block in blocks:
+                lines = block.strip().split('\n')
+                if len(lines) >= 3:
+                    # Parse timestamp line (format: 00:00:01,000 --> 00:00:04,000)
+                    timestamp_line = lines[1]
+                    if ' --> ' in timestamp_line:
+                        start_str, end_str = timestamp_line.split(' --> ')
+                        start_time = self._srt_time_to_seconds(start_str)
+                        end_time = self._srt_time_to_seconds(end_str)
+                        
+                        # Get subtitle text (everything after the timestamp line)
+                        text = '\n'.join(lines[2:])
+                        
+                        subtitles.append({
+                            'start': start_time,
+                            'end': end_time,
+                            'text': text
+                        })
+            
+            return subtitles
+            
+        except Exception as e:
+            logger.error(f"Error parsing SRT file: {str(e)}")
+            return []
+
+    def _srt_time_to_seconds(self, time_str: str) -> float:
+        """
+        Convert SRT time format (HH:MM:SS,mmm) to seconds
+        """
+        try:
+            time_part, ms_part = time_str.split(',')
+            h, m, s = map(int, time_part.split(':'))
+            ms = int(ms_part)
+            
+            total_seconds = h * 3600 + m * 60 + s + ms / 1000
+            return total_seconds
+        except:
+            return 0.0
+
+    def extract_metadata_from_path(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract metadata from video file using direct path
+        """
+        try:
             if not os.path.exists(file_path):
                 logger.error(f"File not found: {file_path}")
                 return None
@@ -103,6 +275,17 @@ class VideoProcessor:
 
             return metadata
 
+        except Exception as e:
+            logger.error(f"Error extracting metadata from {file_path}: {str(e)}")
+            return None
+
+    def extract_metadata(self, filename: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract metadata from video file
+        """
+        try:
+            file_path = os.path.join(self.upload_folder, filename)
+            return self.extract_metadata_from_path(file_path)
         except Exception as e:
             logger.error(f"Error extracting metadata from {filename}: {str(e)}")
             return None
